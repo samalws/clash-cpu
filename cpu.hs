@@ -1,5 +1,3 @@
-{-# LANGUAGE LambdaCase #-}
-
 import qualified Prelude as P
 import Clash.Prelude hiding (Word)
 import Control.Monad.State (runState, State, get, gets, modify, put)
@@ -33,11 +31,10 @@ pcReg cs = if (userMode cs) then 0xF else 0xE
 pc :: CpuState -> Word
 pc cs = (!! pcReg cs) (regs cs)
 
+-- TODO make a function for incrementing PC, and another one for switching in/out of user mode
+
 wordToSigned :: Word -> Signed 32
 wordToSigned = unpack . pack
-
-wordToFloat :: Word -> Float
-wordToFloat = unpack . pack
 
 opChunks :: Nybble -> Vec 4 HalfByte
 opChunks = unpack . pack
@@ -63,7 +60,6 @@ decodeBinopCond :: HalfByte -> RegData -> RegData -> Bool
 decodeBinopCond 0 x y = True
 decodeBinopCond 1 x y = x <= y
 decodeBinopCond 2 x y = wordToSigned x <= wordToSigned y
--- decodeBinopCond 3 x y = wordToFloat x <= wordToFloat y
 decodeBinopCond _ _ _ = undefined
 {-# INLINE decodeBinopCond #-}
 
