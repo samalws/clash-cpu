@@ -5,14 +5,12 @@ import Clash.Prelude hiding (Word)
 import Control.Monad.State (runState, State, get, gets, modify, put)
 import Data.Maybe (fromMaybe)
 
-createDomain vSystem{vName="Dom100", vPeriod=10000}
-
 type HalfByte = Unsigned 4
 type Byte = Unsigned 8
 type Nybble = Unsigned 16
 type Word = Unsigned 32
 type InpType = (Maybe RamType, Bool)
-type OtpType = Maybe (RamAddrType, RamType)
+type OtpType = (RamAddrType, Maybe (RamAddrType, RamType))
 type RamType = Byte
 type RamAddrType = Word
 type PC = RamAddrType
@@ -132,18 +130,21 @@ cpuMainFunc cs@(CpuState { execState = ExecWriteRam addr bytes n }) (bit, _) = (
 
 cpuInitialState = CpuState { regs = repeat 0, execState = Start, userMode = True }
 
-cpuLogic :: HiddenClockResetEnable dom => Signal dom RamType -> Signal dom Bool -> Signal dom (RamAddrType, Maybe (RamAddrType, RamType))
-cpuLogic ia ib = mealy cpuMainFunc cpuInitialState $ bundle (ia, ib)
+cpuTopLvl :: HiddenClockResetEnable dom => Signal dom RamType -> Signal dom Bool -> Signal dom (RamAddrType, Maybe (RamAddrType, RamType))
+cpuTopLvl ia ib = mealy cpuMainFunc cpuInitialState $ bundle (ia, ib)
 
 initialRamState :: Vec 1000 RamType
 initialRamState = repeat 0
 
-topEntity' :: HiddenClockResetEnable dom => Signal dom InpType -> Signal dom OtpType
-topEntity' inp = otp where
-  otp = ramWrite
-  (ramReadAddr, ramWrite) = unbundle $ cpuLogic ramReadData (snd <$> inp)
+cpuWithRam :: HiddenClockResetEnable dom => Signal dom InpType -> Signal dom OtpType
+cpuWithRam inp = otp where
+  (inpData, interrupt) = unbundle inp
+  (ramReadAddr, ramWrite) = unbundle otp
+  otp = cpuTopLvl inpData' interrupt
   ramReadData = blockRam initialRamState ramReadAddr ramWrite
-  ramReadData' = fromMaybe <$> ramReadData <*> (fst <$> inp)
+  inpData' = fromMaybe <$> ramReadData <*> inpData
+
+createDomain vSystem{vName="Dom100", vPeriod=10000}
 
 topEntity :: Signal Dom100 InpType -> Signal Dom100 OtpType
-topEntity = withClockResetEnable clockGen resetGen enableGen topEntity'
+topEntity = withClockResetEnable clockGen resetGen enableGen cpuWithRam
