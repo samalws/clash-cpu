@@ -149,7 +149,7 @@ cpuRamRom rom ramSize inp = otp where
   ramWrite' = decideWrite <$> ramWrite
   decideWrite (Just (w,_)) | w >= (snatToNum ramSize) = Nothing
   decideWrite a = a
-  inpData' = register undefined $ decideInput <$> ramReadData <*> ramReadAddr <*> inpData
+  inpData' = decideInput <$> ramReadData <*> register 0 ramReadAddr <*> inpData
   decideInput _ _ (Just a) = a
   decideInput _ n _ | n < snatToNum (lengthS rom) = rom !! n
   decideInput _ n _ | n >= snatToNum ramSize = 0
@@ -161,7 +161,7 @@ topEntity' :: HiddenClockResetEnable dom => Signal dom Bit -> Signal dom Bit
 topEntity' inp = otp where
   (readAddr, maybeWrite) = unbundle $ cpuRamRom code (SNat :: SNat 1000) cpuInput
   cpuInput = register (Nothing, False) $ genCpuInp <$> readAddr <*> inp
-  genCpuInp 0xFFF2 i = (Just (fromIntegral i), False) -- TODO uhhh why not 0xFFF3?
+  genCpuInp 0xFFF3 i = (Just (fromIntegral i), False)
   genCpuInp _ _ = (Nothing, False)
   otp = regMaybe 0 (genOtpRegVal <$> maybeWrite)
   genOtpRegVal (Just (0xFFF3, v)) = Just (if v == 0 then 0 else 1)
