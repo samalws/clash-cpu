@@ -5,12 +5,9 @@ Instruction set specs / features:
 - Hardware and software interrupts
 - Memory mapped IO
 - Very uniform instruction set
-- Almost all operations support being run conditionally
+- All operations support being run conditionally (easy branchless programming)
 - Jumps are done via writing to PC register
 
 Need to do:
 - Virtual addressing
 - Memory permissions
-- Tweak MOV instructions so they can be run conditionally and don't have separate machine codes
-- Maybe add floats
-- Try it out on a real FPGA
