@@ -17,13 +17,12 @@ type Reg = HalfByte
 data CpuExecState = Start | ReadInstr | ExecInstr Byte | ExecReadRam RamAddrType Reg (Index 4) | ExecWriteRam RamAddrType (Vec 3 Byte) (Index 3) deriving (Generic, NFDataX)
 data CpuState = CpuState { regs :: Vec 16 RegData, execState :: CpuExecState, userMode :: Bool } deriving (Generic, NFDataX)
 data Op =
-    DebugOtp Reg
-  | SoftInt
+    SoftInt
   | SwitchUser
   | ReadLit Reg
   | ReadRam Reg Reg
   | WriteRam Reg Reg
-  | RegOp { regA :: Reg, regB :: Reg, regOp :: RegData -> RegData -> RegData, opCond :: RegData -> RegData -> Bool }
+  | RegOp { regA :: Reg, regB :: Reg, regOp :: RegData -> RegData -> RegData }
   deriving (Generic, NFDataX)
 
 pcReg :: CpuState -> Reg
@@ -48,66 +47,75 @@ signedBinop f x y = unpack $ pack $ wordToSigned x `f` wordToSigned y
 
 decodeBinopFn :: HalfByte -> RegData -> RegData -> RegData
 decodeBinopFn 0 = const
--- decodeBinopFn 1 = (\x y -> x `shiftL` fromIntegral y) TODO find a way to do this without Ints
--- decodeBinopFn 2 = (\x y -> x `shiftR` fromIntegral y) TODO
-decodeBinopFn 3 = (.&.)
-decodeBinopFn 4 = (.|.)
-decodeBinopFn 5 = xor
-decodeBinopFn 6 = (+)
-decodeBinopFn 7 = (-)
-decodeBinopFn 8 = (*)
-decodeBinopFn 9 = signedBinop (+)
-decodeBinopFn 10 = signedBinop (-)
-decodeBinopFn 11 = signedBinop (*)
+-- decodeBinopFn 3 = (\x y -> x `shiftL` fromIntegral y) TODO find a way to do this without Ints
+-- decodeBinopFn 4 = (\x y -> x `shiftR` fromIntegral y) TODO
+decodeBinopFn 5 = (.&.)
+decodeBinopFn 6 = (.|.)
+decodeBinopFn 7 = xor
+decodeBinopFn 8 = (+)
+decodeBinopFn 9 = (-)
+decodeBinopFn 0xA = (*)
+decodeBinopFn 0xB = signedBinop (+)
+decodeBinopFn 0xC = signedBinop (-)
+decodeBinopFn 0xD = signedBinop (*)
 {-# INLINE decodeBinopFn #-}
 
-decodeBinopCond :: HalfByte -> RegData -> RegData -> Bool
-decodeBinopCond 0 x y = True
-decodeBinopCond 1 x y = x <= y
-decodeBinopCond 2 x y = wordToSigned x <= wordToSigned y
-decodeBinopCond _ _ _ = undefined
-{-# INLINE decodeBinopCond #-}
+decodeCond :: HalfByte -> RegData -> RegData -> Bool
+decodeCond 0 x y = True
+decodeCond 1 x y = x <= y
+decodeCond 2 x y = wordToSigned x <= wordToSigned y
+decodeCond _ _ _ = undefined
+{-# INLINE decodeCond #-}
 
-decodeOp :: Nybble -> Op
+decodeOp :: Nybble -> (Op, RegData -> RegData -> Bool)
 decodeOp nyb = let chunks = opChunks nyb in case chunks of
-  0xA :> 0xA :> 0xA :> a :> Nil -> DebugOtp a
-  0xE :> 0 :> 0 :> a :> Nil -> ReadLit a
-  0xE :> 1 :> a :> b :> Nil -> ReadRam a b
-  0xE :> 2 :> a :> b :> Nil -> WriteRam a b
-  0xF :> 0 :> 0 :> 0 :> Nil -> SoftInt
-  0xF :> 0 :> 0 :> 1 :> Nil -> SwitchUser
-  c   :> o :> a :> b :> Nil -> RegOp { regA = a, regB = b, regOp = decodeBinopFn o, opCond = decodeBinopCond c }
+  1   :> c :> a :> b :> Nil -> (ReadRam  a b, decodeCond c)
+  2   :> c :> a :> b :> Nil -> (WriteRam a b, decodeCond c)
+  0xF :> c :> 0 :> a :> Nil -> (ReadLit  a,   decodeCond c)
+  0xF :> c :> 8 :> 0 :> Nil -> (SoftInt,      decodeCond c)
+  0xF :> c :> 8 :> 1 :> Nil -> (SwitchUser,   decodeCond c)
+  o   :> c :> a :> b :> Nil -> (RegOp { regA = a, regB = b, regOp = decodeBinopFn o }, decodeCond c)
 {-# INLINE decodeOp #-}
 
 nop :: Op
-nop = decodeOp 0
+nop = fst $ decodeOp 0
 {-# INLINE nop #-}
 
 modifyOpUser :: Bool -> Op -> Op
+modifyOpUser True (ReadRam a b) | a == 0xE || b == 0xE = nop
+modifyOpUser True (WriteRam a b) | a == 0xE || b == 0xE = nop
+modifyOpUser True (ReadLit 0xE) = nop
 modifyOpUser True op@RegOp{} | regA op == 0xE || regB op == 0xE = nop
 modifyOpUser _ op = op
 {-# INLINE modifyOpUser #-}
 
-cpuExecOp :: Op -> CpuState -> (CpuState, (RamAddrType, Maybe (RamAddrType, RamType)))
-cpuExecOp (DebugOtp r) cs = (cs', (pc cs', Just (regs cs !! r, 0))) where
-  cs' = incPC $ cs { execState = ReadInstr }
-cpuExecOp SoftInt cs | userMode cs = (cs', (pc cs', Nothing)) where
-  cs' = setPC 4 $ (incPC cs) { userMode = False, execState = ReadInstr }
-cpuExecOp SwitchUser cs | not (userMode cs) = (cs', (pc cs', Nothing)) where
-  cs' = cs { execState = ReadInstr, userMode = True }
-cpuExecOp (ReadLit r) cs = (cs', (readAddr, Nothing)) where
-  cs' = incPC $ incPC $ incPC $ cs { execState = ExecReadRam readAddr r 0 }
+cpuExecOp :: (Op, RegData -> RegData -> Bool) -> CpuState -> (CpuState, (RamAddrType, Maybe (RamAddrType, RamType)))
+cpuExecOp (SoftInt, c) cs = (cs', (pc cs', Nothing)) where
+  condCheck = c (regs cs !! 0) (regs cs !! 1) && userMode cs
+  csA = setPC 4 $ (incPC cs) { userMode = False, execState = ReadInstr }
+  csB = incPC $ cs { execState = ReadInstr }
+  cs' = if condCheck then csA else csB
+cpuExecOp (SwitchUser, c) cs = (cs', (pc cs', Nothing)) where
+  condCheck = c (regs cs !! 0) (regs cs !! 1) && not (userMode cs)
+  csA = cs { execState = ReadInstr, userMode = True }
+  csB = incPC $ cs { execState = ReadInstr }
+  cs' = if condCheck then csA else csB
+cpuExecOp (ReadLit r, c) cs = (cs', (readAddr, Nothing)) where
+  condCheck = c (regs cs !! 0) (regs cs !! 1)
+  cs' = incPC $ incPC $ incPC $ cs { execState = if condCheck then ExecReadRam readAddr r 0 else ReadInstr }
   readAddr = pc cs + 2
-cpuExecOp (ReadRam a b) cs = (cs', (readAddr, Nothing)) where
-  cs' = incPC $ cs { execState = ExecReadRam readAddr a 0 }
+cpuExecOp (ReadRam a b, c) cs = (cs', (readAddr, Nothing)) where
+  condCheck = c (regs cs !! 0) (regs cs !! 1)
+  cs' = incPC $ cs { execState = if condCheck then ExecReadRam readAddr a 0 else ReadInstr }
   readAddr = regs cs !! b
-cpuExecOp (WriteRam a b) cs = (cs', (pc cs {- irrelevant -}, Just (writeAddr, bytes !! 0))) where
-  cs' = incPC $ cs { execState = ExecWriteRam (writeAddr+1) (tail bytes) 0 }
+cpuExecOp (WriteRam a b, c) cs = (cs', (pc cs {- irrelevant -}, if condCheck then Just (writeAddr, bytes !! 0) else Nothing)) where
+  condCheck = c (regs cs !! 0) (regs cs !! 1)
+  cs' = incPC $ cs { execState = if condCheck then ExecWriteRam (writeAddr+1) (tail bytes) 0 else ReadInstr }
   writeAddr = regs cs !! a
   bytes = unpack (pack (regs cs !! b))
-cpuExecOp op@(RegOp{}) cs = (cs', (pc cs', Nothing)) where
+cpuExecOp (op@RegOp{}, c) cs = (cs', (pc cs', Nothing)) where
+  condCheck = c (regs cs !! 0) (regs cs !! 1)
   cs' = incPC $ cs { regs = if condCheck then newRegs else regs cs, execState = ReadInstr }
-  condCheck = opCond op (regs cs !! 0) (regs cs !! 1)
   newRegs = replace (regA op) (regOp op (regs cs !! regA op) (regs cs !! regB op)) (regs cs)
 {-# INLINE cpuExecOp #-}
 
@@ -116,9 +124,10 @@ cpuMainFunc cs@(CpuState { execState = Start }) _ = (cs { execState = ReadInstr 
 cpuMainFunc cs@(CpuState { execState = ReadInstr }) (_, True) | userMode cs = (cs', (pc cs', Nothing)) where
   cs' = cs { userMode = False, regs = replace 0xE 2 (regs cs) }
 cpuMainFunc cs@(CpuState { execState = ReadInstr }) (bitA, _) = (cs { execState = ExecInstr bitA }, (pc cs + 1, Nothing))
-cpuMainFunc cs@(CpuState { execState = ExecInstr bitA }) (bitB, _) = cpuExecOp op cs where
+cpuMainFunc cs@(CpuState { execState = ExecInstr bitA }) (bitB, _) = cpuExecOp (op',c) cs where
   opNyb = unpack (pack (bitA, bitB))
-  op = modifyOpUser (userMode cs) (decodeOp opNyb)
+  (op,c) = decodeOp opNyb
+  op' = modifyOpUser (userMode cs) op
 cpuMainFunc cs@(CpuState { execState = ExecReadRam _ r 3 }) (bit, _) = (cs', (pc cs', Nothing)) where
   cs' = cs { execState = ReadInstr, regs = replace r (((regs cs !! r) `shiftL` 8) .|. resize bit) (regs cs) }
 cpuMainFunc cs@(CpuState { execState = ExecReadRam addr r amtLeft }) (bit, _) = (cs', (addr+1, Nothing)) where
@@ -146,7 +155,7 @@ cpuRamRom rom ramSize inp = otp where
   decideInput _ n _ | n >= snatToNum ramSize = 0
   decideInput ramData _ _ = ramData
 
-code = 0xE0 :> 0x00 :>  0 :> 0 :> 0xFF :> 0xF0 :>  0xE1 :> 0x10 :>  0xE2 :> 0x01 :>  0xE0 :> 0x0E :>  0 :> 0 :> 0 :> 6 :>  Nil
+code = 0xF0 :> 0x00 :>  0 :> 0 :> 0xFF :> 0xF0 :>  0x10 :> 0x10 :>  0x20 :> 0x01 :>  0xF0 :> 0x0E :>  0 :> 0 :> 0 :> 6 :>  Nil
 
 topEntity' :: HiddenClockResetEnable dom => Signal dom Bit -> Signal dom Bit
 topEntity' inp = otp where
