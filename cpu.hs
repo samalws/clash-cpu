@@ -147,9 +147,11 @@ firstJust sig = f <$> bundle sig where
   g (Just a) b = Just a
   g Nothing b = b
 
-maybeRam :: (HiddenClockResetEnable dom) => SNat n -> Signal dom RamAddrType -> Signal dom (Maybe (RamAddrType, RamType)) -> Signal dom (Maybe RamType)
-maybeRam ramSize readAddr write = f <$> register 0 readAddr <*> blockRam (replicate ramSize 0) readAddr write where
-  f addr val = if addr >= (snatToNum ramSize) then Just val else Nothing
+maybeRamBlob :: (HiddenClockResetEnable dom) => SNat n -> MemBlob n 8 -> Signal dom RamAddrType -> Signal dom (Maybe (RamAddrType, RamType)) -> Signal dom (Maybe RamType)
+maybeRamBlob ramSize blob readAddr write = f <$> register 0 readAddr <*> blockRamBlob blob readAddr (w <$> write) where
+  f addr val = if addr >= (snatToNum ramSize) then Nothing else Just (unpack val)
+  w (Just (addr, val)) | addr < (snatToNum ramSize) = Just (addr, pack val)
+  w _ = Nothing
 
 maybeRamFile :: (HiddenClockResetEnable dom) => SNat n -> FilePath -> Signal dom RamAddrType -> Signal dom (Maybe (RamAddrType, RamType)) -> Signal dom (Maybe RamType)
 maybeRamFile ramSize path readAddr write = f <$> register 0 readAddr <*> blockRamFile ramSize path readAddr (w <$> write) where
@@ -157,16 +159,16 @@ maybeRamFile ramSize path readAddr write = f <$> register 0 readAddr <*> blockRa
   w (Just (addr, val)) | addr < (snatToNum ramSize) = Just (addr, pack val)
   w _ = Nothing
 
-cpuRamRom :: (HiddenClockResetEnable dom) => SNat n -> SNat m -> FilePath -> Signal dom InpType -> Signal dom OtpType
-cpuRamRom ramFileSize ramSize ramFilePath inp = otp where
+cpuRamRom :: (HiddenClockResetEnable dom) => SNat n -> SNat m -> FilePath -> MemBlob m 8 -> Signal dom InpType -> Signal dom OtpType
+cpuRamRom ramFileSize ramSize ramFilePath ramBlob inp = otp where
   (inpData, interrupt) = unbundle inp
   (ramReadAddr, ramWrite) = unbundle otp
   otp = cpuTopLvl ramRead interrupt
-  ramRead = fromMaybe 0 <$> firstJust (inpData :> maybeRamFile ramFileSize ramFilePath ramReadAddr ramWrite :> maybeRam ramSize ramReadAddr ramWrite :> Nil)
+  ramRead = fromMaybe 0 <$> firstJust (inpData :> maybeRamFile ramFileSize ramFilePath ramReadAddr ramWrite :> maybeRamBlob ramSize ramBlob ramReadAddr ramWrite :> Nil)
 
 topEntity' :: HiddenClockResetEnable dom => Signal dom Bit -> Signal dom Bit
 topEntity' inp = otp where
-  (readAddr, maybeWrite) = unbundle $ cpuRamRom (SNat :: SNat 30) (SNat :: SNat 100000) "meminit.bin" cpuInput
+  (readAddr, maybeWrite) = unbundle $ cpuRamRom (SNat :: SNat 30) (SNat :: SNat 100000) "meminit.bin" $(memBlobTH Nothing (P.replicate 100000 (0 :: BitVector 8))) cpuInput
   cpuInput = register (Nothing, False) $ genCpuInp <$> readAddr <*> inp
   genCpuInp 0xFFF3 i = (Just (fromIntegral i), False)
   genCpuInp _ _ = (Nothing, False)
