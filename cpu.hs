@@ -140,26 +140,35 @@ cpuInitialState = CpuState { regs = repeat 0, execState = Start, userMode = Fals
 cpuTopLvl :: HiddenClockResetEnable dom => Signal dom RamType -> Signal dom Bool -> Signal dom (RamAddrType, Maybe (RamAddrType, RamType))
 cpuTopLvl ia ib = mealy cpuMainFunc cpuInitialState $ bundle (ia, ib)
 
-cpuRamRom :: (HiddenClockResetEnable dom, KnownNat n, KnownNat ramSize) => Vec n RamType -> SNat ramSize -> Signal dom InpType -> Signal dom OtpType
-cpuRamRom rom ramSize inp = otp where
+firstJust :: (KnownNat n) => Vec n (Signal dom (Maybe a)) -> Signal dom (Maybe a)
+firstJust sig = f <$> bundle sig where
+  f = foldl g Nothing
+  g (Just a) b = Just a
+  g Nothing b = b
+
+maybeRom :: (HiddenClockResetEnable dom, KnownNat n) => Vec n RamType -> Signal dom RamAddrType -> Signal dom (Maybe RamType)
+maybeRom romVals readAddr = f <$> register 0 readAddr <*> rom romVals readAddr where
+  f addr val = if addr >= (fromInteger $ natVal $ asNatProxy romVals) then Nothing else Just val
+
+maybeRam :: (HiddenClockResetEnable dom, KnownNat n) => SNat n -> Signal dom RamAddrType -> Signal dom (Maybe (RamAddrType, RamType)) -> Signal dom (Maybe RamType)
+maybeRam ramSize readAddr write = f <$> register 0 readAddr <*> blockRam (replicate ramSize 0) readAddr write where
+  f addr val = if addr >= (snatToNum ramSize) then Nothing else Just val
+
+cpuRamRom :: (HiddenClockResetEnable dom, KnownNat n, KnownNat m) => SNat n -> Vec m RamType -> Signal dom InpType -> Signal dom OtpType
+cpuRamRom ramSize romVals inp = otp where
   (inpData, interrupt) = unbundle inp
-  (ramReadAddr, ramWrite) = unbundle otp
+  (readAddr, ramWrite) = unbundle otp
   otp = cpuTopLvl inpData' interrupt
-  ramReadData = blockRam (replicate ramSize 0) ramReadAddr ramWrite'
   ramWrite' = decideWrite <$> ramWrite
   decideWrite (Just (w,_)) | w >= (snatToNum ramSize) = Nothing
   decideWrite a = a
-  inpData' = decideInput <$> ramReadData <*> register 0 ramReadAddr <*> inpData
-  decideInput _ _ (Just a) = a
-  decideInput _ n _ | n < snatToNum (lengthS rom) = rom !! n
-  decideInput _ n _ | n >= snatToNum ramSize = 0
-  decideInput ramData _ _ = ramData
+  inpData' = fromMaybe 0 <$> firstJust (inpData :> maybeRom romVals readAddr :> maybeRam ramSize readAddr ramWrite :> Nil)
 
 code = 0xF0 :> 0x00 :>  0 :> 0 :> 0xFF :> 0xF0 :>  0x10 :> 0x10 :>  0x20 :> 0x01 :>  0xF0 :> 0x0E :>  0 :> 0 :> 0 :> 6 :>  Nil
 
 topEntity' :: HiddenClockResetEnable dom => Signal dom Bit -> Signal dom Bit
 topEntity' inp = otp where
-  (readAddr, maybeWrite) = unbundle $ cpuRamRom code (SNat :: SNat 1000) cpuInput
+  (readAddr, maybeWrite) = unbundle $ cpuRamRom (SNat :: SNat 1000000) code cpuInput
   cpuInput = register (Nothing, False) $ genCpuInp <$> readAddr <*> inp
   genCpuInp 0xFFF3 i = (Just (fromIntegral i), False)
   genCpuInp _ _ = (Nothing, False)
