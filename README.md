@@ -1,5 +1,5 @@
 Instruction set specs / features:
-- 32-bit registers
+- 64-bit registers
 - 16-bit instructions
 - Kernel vs. user mode
 - Hardware and software interrupts
