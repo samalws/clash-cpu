@@ -4,18 +4,19 @@ import Control.Monad.State (runState, State, get, gets, modify, put)
 import Data.Maybe (fromMaybe)
 import Clash.Signal.Internal (Signal(..))
 
-type HalfByte = Unsigned 4
+type Nybble = Unsigned 4
 type Byte = Unsigned 8
-type Nybble = Unsigned 16
-type Word = Unsigned 32
+type TwoByte = Unsigned 16
+type Word = Unsigned 64
+type SignedWord = Signed 64
 type InpType = (Maybe RamType, Bool)
 type OtpType = (RamAddrType, Maybe (RamAddrType, RamType))
 type RamType = Byte
 type RamAddrType = Word
 type PC = RamAddrType
 type RegData = Word
-type Reg = HalfByte
-data CpuExecState = Start | ReadInstr | ExecInstr Byte | ExecReadRam RamAddrType Reg (Index 4) | ExecWriteRam RamAddrType (Vec 3 Byte) (Index 3) deriving (Generic, NFDataX)
+type Reg = Nybble
+data CpuExecState = Start | ReadInstr | ExecInstr Byte | ExecReadRam RamAddrType Reg (Index 8) | ExecWriteRam RamAddrType (Vec (8-1) Byte) (Index (8-1)) deriving (Generic, NFDataX)
 data CpuState = CpuState { regs :: Vec 16 RegData, execState :: CpuExecState, userMode :: Bool } deriving (Generic, NFDataX)
 data Op =
     SoftInt
@@ -35,19 +36,22 @@ pc cs = (!! pcReg cs) (regs cs)
 setPC :: RegData -> CpuState -> CpuState
 setPC pc' cs = cs { regs = replace (pcReg cs) pc' (regs cs) }
 
+addPC :: RegData -> CpuState -> CpuState
+addPC n cs = setPC (pc cs + n) cs
+
 incPC :: CpuState -> CpuState
-incPC cs = setPC (pc cs + 2) cs
+incPC = addPC 2
 
-wordToSigned :: Word -> Signed 32
-wordToSigned = unpack . pack
+wordToSigned :: Word -> SignedWord
+wordToSigned = bitCoerce
 
-opChunks :: Nybble -> Vec 4 HalfByte
-opChunks = unpack . pack
+opChunks :: TwoByte -> Vec 4 Nybble
+opChunks = bitCoerce
 
-signedBinop f x y = unpack $ pack $ wordToSigned x `f` wordToSigned y
+signedBinop f x y = bitCoerce $ wordToSigned x `f` wordToSigned y
 
-decodeBinopFn :: HalfByte -> RegData -> RegData -> RegData
-decodeBinopFn 0 = const
+decodeBinopFn :: Nybble -> RegData -> RegData -> RegData
+decodeBinopFn 0 = (\a b -> b)
 -- decodeBinopFn 3 = (\x y -> x `shiftL` fromIntegral y) TODO find a way to do this without Ints
 -- decodeBinopFn 4 = (\x y -> x `shiftR` fromIntegral y) TODO
 decodeBinopFn 5 = (.&.)
@@ -61,14 +65,14 @@ decodeBinopFn 0xC = signedBinop (-)
 decodeBinopFn 0xD = signedBinop (*)
 {-# INLINE decodeBinopFn #-}
 
-decodeCond :: HalfByte -> RegData -> RegData -> Bool
+decodeCond :: Nybble -> RegData -> RegData -> Bool
 decodeCond 0 x y = True
 decodeCond 1 x y = x <= y
 decodeCond 2 x y = wordToSigned x <= wordToSigned y
 decodeCond _ _ _ = undefined
 {-# INLINE decodeCond #-}
 
-decodeOp :: Nybble -> (Op, RegData -> RegData -> Bool)
+decodeOp :: TwoByte -> (Op, RegData -> RegData -> Bool)
 decodeOp nyb = let chunks = opChunks nyb in case chunks of
   1   :> c :> a :> b :> Nil -> (ReadRam  a b, decodeCond c)
   2   :> c :> a :> b :> Nil -> (WriteRam a b, decodeCond c)
@@ -103,17 +107,17 @@ cpuExecOp (SwitchUser, c) cs = (cs', (pc cs', Nothing)) where
   cs' = if condCheck then csA else csB
 cpuExecOp (ReadLit r, c) cs = (cs', (readAddr, Nothing)) where
   condCheck = c (regs cs !! 0) (regs cs !! 1)
-  cs' = incPC $ incPC $ incPC $ cs { execState = if condCheck then ExecReadRam readAddr r 0 else ReadInstr }
+  cs' = addPC (8+2) $ cs { execState = if condCheck then ExecReadRam readAddr r 0 else ReadInstr }
   readAddr = pc cs + 2
-cpuExecOp (ReadRam a b, c) cs = (cs', (readAddr, Nothing)) where
+cpuExecOp (ReadRam a b, c) cs = (cs', (if condCheck then readAddr else pc cs', Nothing)) where
   condCheck = c (regs cs !! 0) (regs cs !! 1)
   cs' = incPC $ cs { execState = if condCheck then ExecReadRam readAddr a 0 else ReadInstr }
   readAddr = regs cs !! b
-cpuExecOp (WriteRam a b, c) cs = (cs', (pc cs {- irrelevant -}, if condCheck then Just (writeAddr, bytes !! 0) else Nothing)) where
+cpuExecOp (WriteRam a b, c) cs = (cs', (pc cs', if condCheck then Just (writeAddr, bytes !! 0) else Nothing)) where
   condCheck = c (regs cs !! 0) (regs cs !! 1)
   cs' = incPC $ cs { execState = if condCheck then ExecWriteRam (writeAddr+1) (tail bytes) 0 else ReadInstr }
   writeAddr = regs cs !! a
-  bytes = unpack (pack (regs cs !! b))
+  bytes = bitCoerce (regs cs !! b)
 cpuExecOp (op@RegOp{}, c) cs = (cs', (pc cs', Nothing)) where
   condCheck = c (regs cs !! 0) (regs cs !! 1)
   cs' = incPC $ cs { regs = if condCheck then newRegs else regs cs, execState = ReadInstr }
@@ -126,15 +130,15 @@ cpuMainFunc cs@(CpuState { execState = ReadInstr }) (_, True) | userMode cs = (c
   cs' = cs { userMode = False, regs = replace 0xE 2 (regs cs) }
 cpuMainFunc cs@(CpuState { execState = ReadInstr }) (bitA, _) = (cs { execState = ExecInstr bitA }, (pc cs + 1, Nothing))
 cpuMainFunc cs@(CpuState { execState = ExecInstr bitA }) (bitB, _) = cpuExecOp (op',c) cs where
-  opNyb = unpack (pack (bitA, bitB))
+  opNyb = bitCoerce (bitA, bitB)
   (op,c) = decodeOp opNyb
   op' = modifyOpUser (userMode cs) op
-cpuMainFunc cs@(CpuState { execState = ExecReadRam _ r 3 }) (bit, _) = (cs', (pc cs', Nothing)) where
+cpuMainFunc cs@(CpuState { execState = ExecReadRam _ r 7 {- = 8-1 -} }) (bit, _) = (cs', (pc cs', Nothing)) where
   cs' = cs { execState = ReadInstr, regs = replace r (((regs cs !! r) `shiftL` 8) .|. resize bit) (regs cs) }
 cpuMainFunc cs@(CpuState { execState = ExecReadRam addr r amtLeft }) (bit, _) = (cs', (addr+1, Nothing)) where
   cs' = cs { execState = ExecReadRam (addr+1) r (amtLeft+1), regs = replace r (((regs cs !! r) `shiftL` 8) .|. resize bit) (regs cs) }
 cpuMainFunc cs@(CpuState { execState = ExecWriteRam addr bytes n }) (bit, _) = (cs', (pc cs, Just (addr, bytes !! n))) where
-  cs' = cs { execState = if n == 2 then ReadInstr else ExecWriteRam (addr+1) bytes (n+1) }
+  cs' = cs { execState = if n == maxBound then ReadInstr else ExecWriteRam (addr+1) bytes (n+1) }
 
 cpuInitialState = CpuState { regs = repeat 0, execState = Start, userMode = False }
 
@@ -166,17 +170,19 @@ cpuRamRom ramFileSize ramSize ramFilePath ramBlob inp = otp where
   otp = cpuTopLvl ramRead interrupt
   ramRead = fromMaybe 0 <$> firstJust (inpData :> maybeRamFile ramFileSize ramFilePath ramReadAddr ramWrite :> maybeRamBlob ramSize ramBlob ramReadAddr ramWrite :> Nil)
 
-topEntity' :: HiddenClockResetEnable dom => Signal dom Bit -> Signal dom Bit
-topEntity' inp = otp where
-  (readAddr, maybeWrite) = unbundle $ cpuRamRom (SNat :: SNat 30) (SNat :: SNat 100000) "meminit.bin" $(memBlobTH Nothing (P.replicate 100000 (0 :: BitVector 8))) cpuInput
-  cpuInput = register (Nothing, False) $ genCpuInp <$> readAddr <*> inp
-  genCpuInp 0xFFF3 i = (Just (fromIntegral i), False)
+topEntity' :: HiddenClockResetEnable dom => (Signal dom Bool, Signal dom Bool) -> (Signal dom Bool, Signal dom Bool)
+topEntity' inp = unbundle otp where
+  (readAddr, maybeWrite) = unbundle $ cpuRamRom (SNat :: SNat 100) (SNat :: SNat 100000) "meminit.bin" $(memBlobTH Nothing (P.replicate 100000 (0 :: BitVector 8))) cpuInput
+  cpuInput = register (Nothing, False) $ genCpuInp <$> readAddr <*> bundle inp
+  genCpuInp 0xFFF3 (i,_) = (Just (if i then 1 else 0), False)
+  genCpuInp 0xFFF7 (_,i) = (Just (if i then 1 else 0), False)
   genCpuInp _ _ = (Nothing, False)
-  otp = regMaybe 0 (genOtpRegVal <$> maybeWrite)
-  genOtpRegVal (Just (0xFFF3, v)) = Just (if v == 0 then 0 else 1)
-  genOtpRegVal _ = Nothing
+  otp = regMaybe (True,True) (genOtpRegVal <$> otp <*> maybeWrite)
+  genOtpRegVal (a,b) (Just (0xFFF3, v)) = Just (v==0,b)
+  genOtpRegVal (a,b) (Just (0xFFF7, v)) = Just (a,v==0)
+  genOtpRegVal _ _ = Nothing
 
 createDomain vSystem{vName="Dom100", vPeriod=10000}
 
-topEntity :: ("clk" ::: Clock Dom100) -> ("btn" ::: Signal Dom100 Bit) -> ("led" ::: Signal Dom100 Bit)
-topEntity clk btn = withClockResetEnable clk resetGen enableGen topEntity' btn
+topEntity :: Clock Dom100 -> (Signal Dom100 Bool, Signal Dom100 Bool) -> (Signal Dom100 Bool, Signal Dom100 Bool)
+topEntity clk btns = withClockResetEnable clk resetGen enableGen topEntity' btns
