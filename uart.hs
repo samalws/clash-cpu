@@ -16,30 +16,48 @@ uartCountdownBool :: (HiddenClockResetEnable dom, DomainPeriod dom ~ period, Kno
   SNat baud -> Signal dom Bool -> Signal dom Bool
 uartCountdownBool baud set = (== 0) <$> uartCountdown baud set
 
-data UARTstage = BeforeStart (Index 100) | WaitingInput | StartBit (Vec 8 Bit) | DataBits (Vec 8 Bit) (Index 8) | StopBit deriving (Generic, NFDataX)
-
-uart :: (HiddenClockResetEnable dom, DomainPeriod dom ~ period, KnownNat period, KnownNat baud, 1 <= period, 1 <= baud) =>
+data TxUARTstage = TxWaitingInput | TxStartBit (Vec 8 Bit) | TxDataBits (Vec 8 Bit) (Index 8) | TxStopBit deriving (Generic, NFDataX)
+uartTx :: (HiddenClockResetEnable dom, DomainPeriod dom ~ period, KnownNat period, KnownNat baud, 1 <= period, 1 <= baud) =>
   SNat baud -> Signal dom (Maybe (Vec 8 Bit)) -> (Signal dom Bool, Signal dom Bit)
-uart baud dat = (ack, otp) where
-  (set, ack, otp) = unbundle $ mealy trans (BeforeStart maxBound) $ bundle (dat,countdown)
+uartTx baud dat = (ack, otp) where
+  (set, ack, otp) = unbundle $ mealy trans TxWaitingInput $ bundle (countdown,dat)
   countdown = uartCountdownBool baud set
 
-  trans (BeforeStart n) (_, True)
-    | n == 0 = (WaitingInput, (False, False, 1))
-    | otherwise = (BeforeStart (n-1), (True, False, 1))
-  trans WaitingInput (Just vec, True) = (StartBit (reverse vec), (True, True, 0))
-  trans (StartBit vec) (_, True) = (DataBits vec 0, (True, False, vec !! 0))
-  trans (DataBits vec n) (_, True)
-    | n == 7 = (StopBit, (True, False, 1))
-    | otherwise = (DataBits vec (n+1), (True, False, vec !! (n+1)))
-  trans StopBit (_, True) = (BeforeStart maxBound, (False, False, 1))
+  trans TxWaitingInput (True, Just vec) = (TxStartBit (reverse vec), (True, True, 0))
+  trans (TxStartBit vec) (True, _) = (TxDataBits vec 0, (True, False, vec !! 0))
+  trans (TxDataBits vec n) (True, _)
+    | n == 7 = (TxStopBit, (True, False, 1))
+    | otherwise = (TxDataBits vec (n+1), (True, False, vec !! (n+1)))
+  trans TxStopBit (True, _) = (TxWaitingInput, (False, False, 1))
   trans s _ = (s, (False, False, defaultOtp s))
 
-  defaultOtp (BeforeStart _) = 1
-  defaultOtp WaitingInput = 1
-  defaultOtp (StartBit _) = 0
-  defaultOtp (DataBits vec n) = vec !! n
-  defaultOtp StopBit = 1
+  defaultOtp TxWaitingInput = 1
+  defaultOtp (TxStartBit _) = 0
+  defaultOtp (TxDataBits vec n) = vec !! n
+  defaultOtp TxStopBit = 1
+
+data RxUARTstage = RxBeforeStart | RxStartBit | RxDataBits (Vec 8 Bit) (Index 8) | RxStopBit deriving (Generic, NFDataX)
+
+uartRx :: (HiddenClockResetEnable dom, DomainPeriod dom ~ period, KnownNat period, KnownNat baud, 1 <= period, 1 <= baud) =>
+  SNat baud -> Signal dom Bool -> Signal dom Bit -> Signal dom (Maybe (Vec 8 Bit))
+uartRx baud ack inp = dat where
+  (setFast, setSlow, dat) = unbundle $ mealy trans (RxBeforeStart, Nothing) $ bundle (countdownFast,countdownSlow,ack,inp)
+  countdownFast = uartCountdownBool (addSNat baud baud) setFast
+  countdownSlow = uartCountdownBool baud setSlow
+
+  trans (rxState,datState) (fastIn,slowIn,ackIn,inpIn) = ((rxState', datRx <|> datAck), (setFast,setSlow,datState)) where
+    datAck = transAck datState ackIn
+    (rxState',datRx,setFast,setSlow) = transRx rxState fastIn slowIn inpIn
+
+  transAck _ True = Nothing
+  transAck a False = a
+
+  transRx RxBeforeStart _ _ 0 = (RxStartBit,Nothing,True,False)
+  transRx RxStartBit True _ _ = (RxDataBits (repeat 0) 0,Nothing,False,True)
+  transRx (RxDataBits vec idx) _ True i | idx /= maxBound = (RxDataBits (replace idx i vec) (idx+1),Nothing,False,True)
+  transRx (RxDataBits vec idx) _ True _ = (RxStopBit,Just (reverse vec),False,True)
+  transRx RxStopBit _ True _ = (RxBeforeStart,Nothing,False,False)
+  transRx s _ _ _ = (s,Nothing,False,False)
 
 charToMsg :: Char -> Vec 8 Bit
 charToMsg c = bitCoerce (fromIntegral (fromEnum c) :: Unsigned 8)
@@ -51,13 +69,23 @@ repeatMsg vec ack = (Just . charToMsg . (vec !!)) <$> counter where
   counter = regEn (s0 (lengthS vec)) ack (suc <$> counter)
   suc m = if m == maxBound then 0 else m+1
 
-repeatMsgUart :: (HiddenClockResetEnable dom, DomainPeriod dom ~ period, KnownNat period, KnownNat baud, 1 <= period, 1 <= baud, KnownNat n) =>
+repeatMsgUartTx :: (HiddenClockResetEnable dom, DomainPeriod dom ~ period, KnownNat period, KnownNat baud, 1 <= period, 1 <= baud, KnownNat n) =>
   SNat baud -> Vec n Char -> Signal dom Bit
-repeatMsgUart baud vec = otp where
-  (ack, otp) = uart baud msg
+repeatMsgUartTx baud vec = otp where
+  (ack, otp) = uartTx baud msg
   msg = repeatMsg vec ack
+
+uartEchoFn :: (HiddenClockResetEnable dom, DomainPeriod dom ~ period, KnownNat period, KnownNat baud, 1 <= period, 1 <= baud) =>
+  SNat baud -> (Vec 8 Bit -> Vec 8 Bit) -> Signal dom Bit -> Signal dom Bit
+uartEchoFn baud f inp = otp where
+  (ack, otp) = uartTx baud (fmap f <$> dat)
+  dat = uartRx baud ack inp
 
 createDomain vSystem{vName="DomMain", vPeriod=20000}
 
-topEntity :: Clock DomMain -> Signal DomMain Bit
-topEntity clk = withClockResetEnable clk resetGen enableGen $ repeatMsgUart (SNat @9600) $(listToVecTH "Hello world\n")
+topEntity_ :: Clock DomMain -> Signal DomMain Bit
+topEntity_ clk = withClockResetEnable clk resetGen enableGen $ repeatMsgUartTx (SNat @9600) $(listToVecTH "Hello world\n")
+
+topEntity :: Clock DomMain -> Signal DomMain Bit -> Signal DomMain Bit
+topEntity clk inp = withClockResetEnable clk resetGen enableGen $ uartEchoFn (SNat @9600) f inp where
+  f = bitCoerce . ((+ 1) :: Unsigned 8 -> Unsigned 8) . bitCoerce
