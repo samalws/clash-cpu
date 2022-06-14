@@ -13,6 +13,9 @@ import CPU.Types (Byte)
 type HDMIWord = Unsigned 10
 data HDMIOtp = HDMIOtp { clkP :: Bit, clkN :: Bit, d0P :: Bit, d0N :: Bit, d1P :: Bit, d1N :: Bit, d2P :: Bit, d2N :: Bit } deriving (Generic, BitPack, NFDataX)
 
+reverseHDMIWord :: HDMIWord -> HDMIWord
+reverseHDMIWord = bitCoerce . bitCoerceMap (reverse :: Vec 10 Bit -> Vec 10 Bit)
+
 genHDMIOtp :: (Bit, Vec 3 Bit) -> HDMIOtp
 genHDMIOtp (a, b :> c :> d :> Nil) = HDMIOtp a (1-a) b (1-b) c (1-c) d (1-d)
 
@@ -36,10 +39,10 @@ loopingBuffer clkA clkB enB writes
           (maybe RamNoOp (uncurry RamWrite) <$> writes)
           (RamRead <$> withClockResetEnable clkB resetGen enB counter)
 
-hdmiControlPeriod :: (Byte, Byte) -> HDMIWord
+hdmiControlPeriod :: (Bit,Bit) -> HDMIWord
 hdmiControlPeriod (0,0) = 0b1101010100
-hdmiControlPeriod (0,1) = 0b0010101011
-hdmiControlPeriod (1,0) = 0b0101010100
+hdmiControlPeriod (1,0) = 0b0010101011
+hdmiControlPeriod (0,1) = 0b0101010100
 hdmiControlPeriod (1,1) = 0b1010101011
 
 hdmiControlPeriodHsync = hdmiControlPeriod <$> ((1,0) :> (0,0) :> (0,0) :> Nil)
@@ -50,18 +53,30 @@ hdmiVideoGuardBand = 0b1011001100 :> 0b0100110011 :> 0b1011001100 :> Nil :: Vec 
 -- for each hsync period: a bunch of hdmiControlPeriodHsync :- 8 x hdmiControlPeriodPreamble :- 2 x hdmiVideoGuardBand
 -- for the big vsync period: a bunch of hdmiControlPeriodVsync :- 8 x hdmiControlPeriodPreamble :- 2 x hdmiVideoGuardBand
 
-hdmiXorPixel :: Vec 8 Bit -> Vec 8 Bit
-hdmiXorPixel = foldl (\v x -> v <<+ x `xor` last v) (repeat 0)
+hdmiXorPixel :: (KnownNat n, n ~ (decN + 1)) => Vec n Bit -> Vec (n+1) Bit
+hdmiXorPixel vec = foldl (\v x -> v <<+ x `xor` last v) (repeat 0) vec ++ (0 :> Nil)
+
+hdmiXnorPixel :: (KnownNat n, n ~ (decN + 1)) => Vec n Bit -> Vec (n+1) Bit
+hdmiXnorPixel vec = foldl (\v x -> v <<+ 1 - (x `xor` last v)) (repeat 0) vec ++ (1 :> Nil)
+
+numTransitions :: (KnownNat n) => Vec n Bit -> Index n
+numTransitions = fst . foldl (\(n,x) y -> if x == (Just y) then (n+1,Just y) else (n,Just y)) (0, Nothing)
+
+hdmiTransitionOptimizeByte :: Vec 8 Bit -> Vec 9 Bit
+hdmiTransitionOptimizeByte byte = if (numTransitions a < numTransitions b) then a else b where
+  a = hdmiXorPixel byte
+  b = hdmiXnorPixel byte
 
 hdmiPixel :: Byte -> HDMIWord
-hdmiPixel b = bitCoerce $ (hdmiXorPixel $ bitCoerce b) ++ (0 :> 0 :> Nil) -- TODO optionally flip
+hdmiPixel b = bitCoerce $ (hdmiXorPixel $ bitCoerce b) ++ (0 :> Nil) -- TODO optionally flip
 
 convScreenCoords :: (KnownNat width, KnownNat height, KnownNat sideWidth, KnownNat sideHeight, Num n) =>
   (SNat width, SNat height, SNat sideWidth, SNat sideHeight) -> n -> n -> n
 convScreenCoords (width, height, sideWidth, _) x y = x + (y * snatToNum (width `addSNat` sideWidth))
 
 data HdmiInitState (width :: Nat) (height :: Nat) (sideWidth :: Nat) (sideHeight :: Nat)
-  = InitHsync (Index sideWidth) (Index height)
+  = InitStart
+  | InitHsync (Index sideWidth) (Index height)
   | InitVsync (Index (width + sideWidth)) (Index sideHeight)
   | InitPreamble (Index 8) (Index height)
   | InitGuardBand (Index 2) (Index height)
@@ -72,13 +87,14 @@ data HdmiInitState (width :: Nat) (height :: Nat) (sideWidth :: Nat) (sideHeight
 initialHdmiInitState :: (KnownNat width, KnownNat height, KnownNat sideWidth, KnownNat sideHeight) =>
   (SNat width, SNat height, SNat sideWidth, SNat sideHeight) ->
   HdmiInitState width height sideWidth sideHeight
-initialHdmiInitState _ = InitHsync 0 0
+initialHdmiInitState _ = InitStart
 
 hdmiInit :: (HiddenClockResetEnable domA, KnownNat width, KnownNat height, KnownNat sideWidth, KnownNat sideHeight, sideWidth ~ (sideWidthSub10 + 10), sideHeight ~ (decSideHeight + 1)) =>
   (SNat width, SNat height, SNat sideWidth, SNat sideHeight) ->
   Signal domA (Maybe (Index (HdmiScreenSize width height sideWidth sideHeight), Vec 3 HDMIWord))
 hdmiInit size@(width, height, sideWidth, sideHeight) = moore trans otp (initialHdmiInitState size) (pure ()) where
 
+  otp InitStart = Just (convScreenCoords size (snatToNum width) 0, hdmiControlPeriodHsync)
   otp (InitHsync x y) = Just (convScreenCoords size (snatToNum width + fromIntegral x) (fromIntegral y), hdmiControlPeriodHsync)
   otp (InitVsync x y) = Just (convScreenCoords size (fromIntegral x) (snatToNum height + fromIntegral y), hdmiControlPeriodVsync)
   otp (InitPreamble x y) | y == maxBound = Just (convScreenCoords size (snatToNum (width `addSNat` sideWidth `subSNat` (SNat @10)) + fromIntegral x) (snatToNum (height `addSNat` sideHeight `subSNat` SNat @1)), hdmiControlPeriodPreamble)
@@ -86,6 +102,7 @@ hdmiInit size@(width, height, sideWidth, sideHeight) = moore trans otp (initialH
   otp (InitGuardBand x y) | y == maxBound = Just (convScreenCoords size (snatToNum (width `addSNat` sideWidth `subSNat` (SNat @2)) + fromIntegral x) (snatToNum (height `addSNat` sideHeight `subSNat` SNat @1)), hdmiVideoGuardBand)
   otp (InitGuardBand x y) = Just (convScreenCoords size (snatToNum (width `addSNat` sideWidth `subSNat` (SNat @2)) + fromIntegral x) (fromIntegral y), hdmiVideoGuardBand)
 
+  trans InitStart () = InitHsync 0 0
   trans (InitHsync x y) () = trans' InitHsync (InitVsync 0 0) x y
   trans (InitVsync x y) () = trans' InitVsync (InitPreamble 0 0) x y
   trans (InitPreamble x y) () = trans' InitPreamble (InitGuardBand 0 0) x y
@@ -104,13 +121,15 @@ hdmiPixelBuffer :: (KnownDomain domA, KnownDomain domB, KnownNat width, KnownNat
   (Signal domA Bool, Signal domB (Vec 3 HDMIWord))
 hdmiPixelBuffer screenSize clkA clkB enB write
   = (isNothing <$> init',
-     loopingBuffer clkA clkB enB (init' .<|>. (fmap processWrite <$> write))) where
+     loopingBuffer clkA clkB enB (reverseWordInp $ init' .<|>. (fmap processWrite <$> write))) where
 
   init' = withClockResetEnable clkA resetGen enableGen (hdmiInit screenSize)
 
   processWrite (x,y,c) =
     (convScreenCoords screenSize (fromIntegral x) (fromIntegral y),
-     hdmiPixel . const 0xF0 {- TODO remove -} <$> c)
+     hdmiPixel <$> c)
+
+  reverseWordInp = fmap $ fmap $ fmap $ fmap reverseHDMIWord
 
 bitIdx :: (BitPack a, KnownNat (BitSize a)) => Index (BitSize a) -> a -> Bit
 bitIdx i a = bitCoerce a !! i
@@ -129,4 +148,4 @@ hdmi screenSize clkA clkB write = (init, delayOtp $ processOtp <$> bitCounter <*
   bitCounter = withClockResetEnable clkB resetGen enableGen counter
   enable = toEnable $ (maxBound ==) <$> bitCounter
 
-  processOtp bitNum vec = genHDMIOtp (bitCoerce (bitNum <= 5), bitIdx bitNum <$> vec)
+  processOtp bitNum vec = genHDMIOtp (bitCoerce (bitNum >= 5), bitIdx bitNum <$> vec)
