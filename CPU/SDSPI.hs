@@ -1,4 +1,4 @@
-module CPU.SDSPI where
+module CPU.SDSPI (spi) where
 
 import Clash.Prelude
 

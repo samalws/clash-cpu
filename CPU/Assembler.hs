@@ -1,7 +1,7 @@
 module CPU.Assembler (Assembler,Cond(..),label,addBytes,addInstr,standardInstr,mov,read,write,shl,shr,band,bor,bxor,add,sub,mul,sadd,ssub,smul,lit,int,user,jmp,jmpK,swap,runAssembler,padAssembly,assemblyToFile) where
 
-import Prelude hiding (read, Word)
-import Clash.Prelude hiding (length, replicate, read, Word, add, mul, sub)
+import qualified Prelude as P
+import Clash.Prelude hiding (read, Word, add, mul, sub)
 
 import Control.Monad.State
 import Control.Monad.Writer
@@ -20,7 +20,7 @@ condToNyb LE = 1
 condToNyb SLE = 2
 
 addBytes :: [Byte] -> Assembler ()
-addBytes bs = tell bs >> modify (+ fromIntegral (length bs))
+addBytes bs = tell bs >> modify (+ fromIntegral (P.length bs))
 
 addInstr :: Vec 4 Nybble -> Assembler ()
 addInstr (a :> b :> c :> d :> Nil) = addBytes $ bitCoerce <$> [(a,b), (c,d)]
@@ -60,7 +60,7 @@ runAssembler :: Assembler () -> [Byte]
 runAssembler = snd . fst . flip runState 0 . runWriterT
 
 padAssembly :: Int -> [Byte] -> [Byte]
-padAssembly n bs = bs <> replicate (n - length bs) 0
+padAssembly n bs = bs <> P.replicate (n - P.length bs) 0
 
 assemblyToFile :: [Byte] -> String
 assemblyToFile = unlines . fmap (binaryShow . bitCoerce) where
