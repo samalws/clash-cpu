@@ -1,4 +1,4 @@
-module CPU.SD where
+module CPU.SD (sd) where
 
 import Clash.Prelude
 
@@ -102,3 +102,14 @@ sdOperation a b c d e = unbundle $ mealy transFunc s0 $ bundle (a,b,c,d,e) where
   otpFunc (OSendingSPI cmd args 0 _)       _                        = (Just (((0 :: Bit) :> 1 :> Nil) ++ bitCoerce (ocmdToByte cmd)), 0, False, False, Nothing)
   otpFunc (OSendingSPI cmd args 5 _)       _                        = (Just (bitCoerce (0x95 :: Unsigned 8)),                         0, False, False, Nothing)
   otpFunc (OSendingSPI cmd args n _)       _                        = (Just ((bitCoerce args :: Vec 4 (Vec 8 Bit)) !! (n-1)),         0, False, False, Nothing)
+
+sd :: (HiddenClockResetEnable dom, KnownNat maxReadBits, KnownNat maxWriteBurstLen, KnownNat maxReadBurstLen, KnownNat maxBurstLen, KnownNat maxAddr, ((maxReadBurstLen + 1) * 8) ~ maxReadBits, 1 <= maxBurstLen, maxWriteBurstLen ~ (1+decMwbl), maxWriteBurstLen <= maxBurstLen, maxReadBurstLen <= maxBurstLen, maxReadBits ~ (n0 + 48)) =>
+  Signal dom (Maybe (Maybe (Vec maxReadBits Bit))) -> Signal dom Bool -> Signal dom (Maybe (Index maxBurstLen)) -> Signal dom (Maybe (Index maxAddr, Vec maxWriteBurstLen Byte)) -> Signal dom (Maybe (Index maxAddr))
+  -> (Signal dom (Maybe (Vec 8 Bit)), Signal dom (Index maxReadBits), Signal dom Bool, Signal dom Bool, Signal dom (Maybe (Vec maxReadBurstLen Byte)))
+sd ia ib ic id ie = (mux b oa1 oa2, mux b ob1 ob2, oc, od, oe) where
+
+  -- input: spiByteRead, spiReqAck, sdBurstLenReq, sdWriteReq, sdReadReq
+  -- output: spiWriteReq, spiReadReq, sdBurstLenAck, sdWriteAck, sdReadAck
+
+  (oa1, ob1, b) = sdInit ia ib
+  (oa2, ob2, oc, od, oe) = sdOperation ia ib ic id ie
