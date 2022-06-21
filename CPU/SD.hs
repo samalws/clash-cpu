@@ -1,9 +1,11 @@
-module CPU.SD (sd) where
+{-# LANGUAGE StandaloneDeriving #-}
 
-import Clash.Prelude
+module CPU.SD (sd, sdDriver, SDUserInp(..), SDInp(..), SDUserOtp(..), SDOtp) where
+
+import Clash.Prelude hiding (read)
 
 import CPU.SDSPI (spi)
-import CPU.Types (Byte)
+import CPU.Util (Byte, rateEnable)
 
 data InitState = WaitingBegin (Index 74) | ISendingSPI ICMD (Index 6) | ReadingStatusByte | WaitingStatusByte | WaitingEnd (Index 8) | Done deriving (Generic, NFDataX)
 data ICMD = CMD0 | CMD55 | ACMD41 deriving (Generic, NFDataX)
@@ -113,3 +115,30 @@ sd ia ib ic id ie = (mux b oa1 oa2, mux b ob1 ob2, oc, od, oe) where
 
   (oa1, ob1, b) = sdInit ia ib
   (oa2, ob2, oc, od, oe) = sdOperation ia ib ic id ie
+
+data SDUserInp maxBurstLen maxWriteBurstLen maxAddr = SDUserInp { setBurstLen :: Maybe (Index maxBurstLen), write :: Maybe (Index maxAddr, Vec maxWriteBurstLen Byte), read :: Maybe (Index maxAddr) } deriving Generic
+deriving instance (1 <= maxBurstLen, 1 <= maxAddr, KnownNat maxBurstLen, KnownNat maxWriteBurstLen, KnownNat maxAddr) => BitPack (SDUserInp maxBurstLen maxWriteBurstLen maxAddr)
+data SDInp = SDInp { miso :: Bit } deriving (Generic, BitPack)
+data SDUserOtp maxReadBurstLen = SDUserOtp { setBurstLenAck :: Bool, writeAck :: Bool, readResult :: Maybe (Vec maxReadBurstLen Byte) } deriving (Generic, BitPack)
+data SDOtp = SDOtp { clk :: Bit, mosi :: Bit, ss :: Bit } deriving (Generic, BitPack)
+
+sdDriver :: (KnownDomain dom, DomainPeriod dom ~ period, KnownNat period, 1 <= period) =>
+            (maxBurstLen ~ 16, maxReadBurstLen ~ 16, maxWriteBurstLen ~ 16, maxAddr ~ 1024, ((maxReadBurstLen + 1) * 8) ~ maxReadBits) =>
+  Clock dom ->
+  Signal dom (SDUserInp maxBurstLen maxWriteBurstLen maxAddr) -> Signal dom SDInp ->
+  (Signal dom (SDUserOtp maxReadBurstLen), Signal dom SDOtp)
+sdDriver clkInp userInp inp = (SDUserOtp <$> _setBurstLenAck <*> _writeAck <*> _readResult, SDOtp <$> _clk <*> _mosi <*> _ss) where
+  _setBurstLen = setBurstLen <$> userInp
+  _write = write <$> userInp
+  _read = read <$> userInp
+  _miso = miso <$> inp
+
+  (_spiWrite, _spiRead, _setBurstLenAck, _writeAck, _readResult) = withClockResetEnable clkInp resetGen _en $ sd _spiReadData _spiReqAck _setBurstLen _write _read
+  (_ss, _mosi, _spiReqAck, _spiReadData) = withClockResetEnable clkInp resetGen _en $ spi _miso _spiWrite _spiRead
+  _clk = withClockResetEnable clkInp resetGen _enClk __clk
+
+  _en = withClockResetEnable clkInp resetGen enableGen $ rateEnable $ SNat @440000
+  _enClk = withClockResetEnable clkInp resetGen enableGen $ rateEnable $ SNat @880000
+
+  __clk :: HiddenClockResetEnable dom => Signal dom Bit
+  __clk = register 0 $ (1 -) <$> __clk

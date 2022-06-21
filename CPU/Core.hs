@@ -7,7 +7,7 @@ import Control.Monad.State (runState, State, get, gets, modify, put)
 import Data.Maybe (fromMaybe)
 import Clash.Signal.Internal (Signal(..))
 
-import CPU.Types
+import CPU.Util
 
 type InpType = (Maybe RamType, Bool)
 type OtpType = (RamAddrType, Maybe (RamAddrType, RamType))

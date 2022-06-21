@@ -3,27 +3,14 @@ module CPU.UART (HzToPeriod, uartTx, uartRx, charToMsg, repeatMsgUartTx, uartEch
 import qualified Prelude as P
 import Clash.Prelude
 
-type HzToPeriod (baud :: Nat) = (10 ^ 12) `Div` baud
-
-uartCountdown :: (HiddenClockResetEnable dom, DomainPeriod dom ~ period, KnownNat period, KnownNat baud, 1 <= period, 1 <= baud) =>
-  SNat baud -> Signal dom Bool -> Signal dom (Index (HzToPeriod baud `Div` period))
-uartCountdown _ set = r where
-  r = register maxBound (f <$> set <*> r)
-  f s n
-    | s = maxBound
-    | n == 0 = 0
-    | otherwise = n-1
-
-uartCountdownBool :: (HiddenClockResetEnable dom, DomainPeriod dom ~ period, KnownNat period, KnownNat baud, 1 <= period, 1 <= baud) =>
-  SNat baud -> Signal dom Bool -> Signal dom Bool
-uartCountdownBool baud set = (== 0) <$> uartCountdown baud set
+import CPU.Util (HzToPeriod, rateCountdownBool)
 
 data TxUARTstage = TxWaitingInput | TxStartBit (Vec 8 Bit) | TxDataBits (Vec 8 Bit) (Index 8) | TxStopBit deriving (Generic, NFDataX)
 uartTx :: (HiddenClockResetEnable dom, DomainPeriod dom ~ period, KnownNat period, KnownNat baud, 1 <= period, 1 <= baud) =>
   SNat baud -> Signal dom (Maybe (Vec 8 Bit)) -> (Signal dom Bool, Signal dom Bit)
 uartTx baud dat = (ack, otp) where
   (set, ack, otp) = unbundle $ mealy trans TxWaitingInput $ bundle (countdown,dat)
-  countdown = uartCountdownBool baud set
+  countdown = rateCountdownBool baud set
 
   trans TxWaitingInput (True, Just vec) = (TxStartBit (reverse vec), (True, True, 0))
   trans (TxStartBit vec) (True, _) = (TxDataBits vec 0, (True, False, vec !! 0))
@@ -44,8 +31,8 @@ uartRx :: (HiddenClockResetEnable dom, DomainPeriod dom ~ period, KnownNat perio
   SNat baud -> Signal dom Bool -> Signal dom Bit -> Signal dom (Maybe (Vec 8 Bit))
 uartRx baud ack inp = dat where
   (setFast, setSlow, dat) = unbundle $ mealy trans (RxBeforeStart, Nothing) $ bundle (countdownFast,countdownSlow,ack,inp)
-  countdownFast = uartCountdownBool (addSNat baud baud) setFast
-  countdownSlow = uartCountdownBool baud setSlow
+  countdownFast = rateCountdownBool (addSNat baud baud) setFast
+  countdownSlow = rateCountdownBool baud setSlow
 
   trans (rxState,datState) (fastIn,slowIn,ackIn,inpIn) = ((rxState', datRx <|> datAck), (setFast,setSlow,datState)) where
     datAck = transAck datState ackIn

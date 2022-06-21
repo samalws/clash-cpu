@@ -8,7 +8,7 @@ import Clash.Explicit.Prelude (trueDualPortBlockRam)
 
 import Data.Maybe (isNothing)
 
-import CPU.Types (Byte)
+import CPU.Util (Byte)
 
 type HDMIWord = Unsigned 10
 data HDMIOtp = HDMIOtp { clkP :: Bit, clkN :: Bit, d0P :: Bit, d0N :: Bit, d1P :: Bit, d1N :: Bit, d2P :: Bit, d2N :: Bit } deriving (Generic, BitPack, NFDataX)

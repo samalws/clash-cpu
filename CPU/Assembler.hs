@@ -6,7 +6,7 @@ import Clash.Prelude hiding (read, Word, add, mul, sub)
 import Control.Monad.State
 import Control.Monad.Writer
 
-import CPU.Types
+import CPU.Util
 
 type Assembler a = WriterT [Byte] (State Word) a
 data Cond = A | LE | SLE
