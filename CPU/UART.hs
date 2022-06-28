@@ -3,7 +3,7 @@ module CPU.UART (HzToPeriod, uartTx, uartRx, charToMsg, repeatMsgUartTx, uartEch
 import qualified Prelude as P
 import Clash.Prelude
 
-import CPU.Util (HzToPeriod, rateCountdownBool)
+import CPU.Util (HzToPeriod, rateCountdownBool, fifoBuffer)
 
 data TxUARTstage = TxWaitingInput | TxStartBit (Vec 8 Bit) | TxDataBits (Vec 8 Bit) (Index 8) | TxStopBit deriving (Generic, NFDataX)
 uartTx :: (HiddenClockResetEnable dom, DomainPeriod dom ~ period, KnownNat period, KnownNat baud, 1 <= period, 1 <= baud) =>
@@ -24,6 +24,12 @@ uartTx baud dat = (ack, otp) where
   defaultOtp (TxStartBit _) = 0
   defaultOtp (TxDataBits vec n) = vec !! n
   defaultOtp TxStopBit = 1
+
+uartTxBuffered :: (HiddenClockResetEnable dom, DomainPeriod dom ~ period, KnownNat period, KnownNat baud, 1 <= period, 1 <= baud, KnownNat fifoDepth, fifoDepth ~ (decDep + 1)) =>
+  SNat fifoDepth -> SNat baud -> Signal dom (Maybe (Vec 8 Bit)) -> Signal dom Bit
+uartTxBuffered depth baud dat = otp where
+  (ack, otp) = uartTx baud dat'
+  dat' = fifoBuffer depth dat ack
 
 data RxUARTstage = RxBeforeStart | RxStartBit | RxDataBits (Vec 8 Bit) (Index 8) | RxStopBit deriving (Generic, NFDataX)
 
